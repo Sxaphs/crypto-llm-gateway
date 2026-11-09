@@ -1,0 +1,110 @@
+# crypto-llm-mvp 网关
+# 公网用户站、公共收银台、内部回调、两个管理域。
+# 管理页面使用 Basic Auth；管理 API 保留 New API/epusdt 原生 Bearer/JWT。
+# 不对 API 叠加 Basic Auth，因为浏览器和上游都使用 Authorization: Bearer。
+
+{
+	email {$ACME_EMAIL:local@localhost}
+	admin off
+}
+
+# 公网用户站：New API + adapter 下单入口。
+{$SITE_DOMAIN} {
+	@blocked {
+		path /admin* /payments* /callbacks*
+		path /api/option* /api/custom-oauth-provider* /api/performance* /api/ratio_sync* /api/plugin* /api/redemption* /api/subscription/admin* /api/system-task* /api/system-info* /api/channel* /api/authz* /api/group* /api/prefill_group* /api/vendors* /api/deployments* /api/models/*
+		path /api/status/test /api/task_plugin_options
+		path /api/user /api/user/ /api/user/topup/complete /api/user/search /api/user/manage /api/user/2fa/stats
+		path /api/log /api/log/ /api/log/stat /api/log/search /api/log/export /api/log/channel_affinity_usage_cache
+		path /api/data /api/data/ /api/data/users /api/data/flow
+		path /api/mj /api/mj/ /api/task /api/task/ /api/audit /api/audit/
+	}
+	@blocked_user_id path_regexp ^/api/user/[0-9]+(?:/.*)?$
+	@blocked_topup_get {
+		path /api/user/topup
+		method GET
+	}
+	handle @blocked {
+		respond 403
+	}
+	handle @blocked_user_id {
+		respond 403
+	}
+	handle @blocked_topup_get {
+		respond 403
+	}
+
+	# 回调仅允许 adapter 固定容器地址；公网来源不能调用。
+	@epay_notify_denied {
+		path /api/user/epay/notify
+		not remote_ip 172.30.250.30
+	}
+	handle @epay_notify_denied {
+		respond 403
+	}
+	handle /crypto-pay/submit.php {
+		reverse_proxy payment-adapter:8080
+	}
+	handle /api/user/epay/notify {
+		reverse_proxy new-api:3000
+	}
+	handle {
+		reverse_proxy new-api:3000
+	}
+}
+
+# 独立公共收银台，避免与 New API 静态资源路径冲突。
+{$PAY_DOMAIN} {
+	@epusdt_blocked path /admin* /payments*
+	handle @epusdt_blocked {
+		respond 403
+	}
+	handle {
+		reverse_proxy epusdt:8000
+	}
+}
+
+# 仅容器网络内部使用：adapter -> New API。
+http://gateway {
+	@notify_denied {
+		path /api/user/epay/notify
+		not remote_ip 172.30.250.30
+	}
+	handle @notify_denied {
+		respond 403
+	}
+	handle /api/user/epay/notify {
+		reverse_proxy new-api:3000
+	}
+	handle {
+		respond 403
+	}
+}
+
+# New API 管理页面 Basic Auth；/api 由 New API session/Bearer 鉴权。
+{$NEW_API_ADMIN_DOMAIN} {
+	handle /api/* {
+		reverse_proxy new-api:3000
+	}
+	handle {
+		basic_auth {
+			admin {$ADMIN_BASIC_AUTH_HASH}
+		}
+		reverse_proxy new-api:3000
+	}
+}
+
+# epusdt 管理页面 Basic Auth；管理 API 保留其 JWT 鉴权。
+{$EPUSDT_ADMIN_DOMAIN} {
+	# 登录后前端会携带 Bearer 请求公共配置；这些 API 不能落入 Basic Auth。
+	@epusdt_api path /admin/api/* /payments/* /pay/*
+	handle @epusdt_api {
+		reverse_proxy epusdt:8000
+	}
+	handle {
+		basic_auth {
+			admin {$ADMIN_BASIC_AUTH_HASH}
+		}
+		reverse_proxy epusdt:8000
+	}
+}

@@ -1,0 +1,34 @@
+# 密钥/本地配置（绝不提交）
+.env
+.env.*
+!.env.example
+
+# 系统与编辑器噪音
+.DS_Store
+Thumbs.db
+desktop.ini
+.idea/
+.vscode/
+*.swp
+
+# 本地 compose 覆盖
+docker-compose.override.yml
+docker-compose.local.yml
+
+# 构建/运行产物
+*.log
+
+# 本地缓存/校验用源码克隆
+.cache/
+
+# Python 产物
+.venv/
+__pycache__/
+.pytest_cache/
+*.pyc
+
+# 验收证据（保留 acceptance/status.json）
+acceptance/evidence/
+
+# 对账报告
+reports/

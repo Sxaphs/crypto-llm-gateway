@@ -1,0 +1,30 @@
+{
+  "$comment": "New API 官方计价 option 的单一事实来源。bootstrap.py 会把 model_ratio / completion_ratio / model_price 三个映射原样导入为 ModelRatio / CompletionRatio / ModelPrice option。单位与注意事项见 pricing/README.md；上线前必须核对真实售价。",
+  "model_ratio": {
+    "gpt-4o-mini": 0.075,
+    "gpt-4o": 1.25,
+    "gpt-4.1-mini": 0.2,
+    "gpt-4.1": 1.0,
+    "deepseek-chat": 0.135,
+    "deepseek-reasoner": 0.275,
+    "claude-3-5-haiku-20241022": 0.5,
+    "claude-3-5-sonnet-20241022": 1.5
+  },
+  "completion_ratio": {
+    "gpt-4o-mini": 4,
+    "gpt-4o": 4,
+    "gpt-4.1-mini": 4,
+    "gpt-4.1": 3,
+    "deepseek-chat": 1,
+    "deepseek-reasoner": 1,
+    "claude-3-5-haiku-20241022": 5,
+    "claude-3-5-sonnet-20241022": 5
+  },
+  "model_price": {
+    "doubao-seedance-1-0-pro-250528": 0.5,
+    "doubao-seedance-1-0-lite-t2v": 0.25,
+    "doubao-seedance-1-0-lite-i2v": 0.25,
+    "doubao-seedance-1-5-pro-251215": 0.6,
+    "doubao-seedream-4-0-250828": 0.05
+  }
+}

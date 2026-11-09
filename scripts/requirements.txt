@@ -1,0 +1,7 @@
+# crypto-llm-mvp 运维脚本依赖。
+# bootstrap.py / validate_pricing.py 只依赖 Python 标准库，无需安装本文件即可运行。
+# reconcile.py 需要 psycopg 读取 adapter PostgreSQL。
+# acceptance.py 的 openai_chat 项必须使用 openai SDK（T5 要求），未安装会 BLOCKED。
+
+psycopg[binary]>=3.1,<4
+openai>=1,<3

@@ -1,0 +1,132 @@
+--- a/src/model/data/admin_user_data.go
++++ b/src/model/data/admin_user_data.go
+@@ -81,7 +81,7 @@
+ 
+ func purgeDeletedInitialAdminPasswordPlainTx(tx *gorm.DB) error {
+ 	return tx.Unscoped().
+-		Where("`key` = ? AND deleted_at IS NOT NULL", mdb.SettingKeyInitAdminPasswordPlain).
++		Where("key = ? AND deleted_at IS NOT NULL", mdb.SettingKeyInitAdminPasswordPlain).
+ 		Delete(&mdb.Setting{}).Error
+ }
+ 
+@@ -163,7 +163,7 @@
+ func GetInitialAdminPassword() (string, error) {
+ 	row := new(mdb.Setting)
+ 	if err := dao.Mdb.Model(&mdb.Setting{}).
+-		Where("`key` = ?", mdb.SettingKeyInitAdminPasswordPlain).
++		Where("key = ?", mdb.SettingKeyInitAdminPasswordPlain).
+ 		Limit(1).
+ 		Find(row).Error; err != nil {
+ 		return "", err
+@@ -174,7 +174,7 @@
+ 
+ 	var fetched mdb.Setting
+ 	if err := dao.Mdb.Model(&mdb.Setting{}).
+-		Where("`key` = ?", mdb.SettingKeyInitAdminPasswordFetched).
++		Where("key = ?", mdb.SettingKeyInitAdminPasswordFetched).
+ 		Limit(1).
+ 		Find(&fetched).Error; err != nil {
+ 		return "", err
+@@ -187,7 +187,7 @@
+ 
+ func clearInitialAdminPasswordPlain(tx *gorm.DB) error {
+ 	res := tx.Unscoped().
+-		Where("`key` = ?", mdb.SettingKeyInitAdminPasswordPlain).
++		Where("key = ?", mdb.SettingKeyInitAdminPasswordPlain).
+ 		Delete(&mdb.Setting{})
+ 	if res.Error != nil {
+ 		return res.Error
+@@ -283,7 +283,7 @@
+ 
+ 		var plainRow mdb.Setting
+ 		if err := tx.Model(&mdb.Setting{}).
+-			Where("`key` = ?", mdb.SettingKeyInitAdminPasswordPlain).
++			Where("key = ?", mdb.SettingKeyInitAdminPasswordPlain).
+ 			Limit(1).
+ 			Find(&plainRow).Error; err != nil {
+ 			return err
+@@ -295,7 +295,7 @@
+ 		// clear any leftover plaintext if it exists.
+ 		var initHashRow mdb.Setting
+ 		if err := tx.Model(&mdb.Setting{}).
+-			Where("`key` = ?", mdb.SettingKeyInitAdminPasswordHash).
++			Where("key = ?", mdb.SettingKeyInitAdminPasswordHash).
+ 			Limit(1).
+ 			Find(&initHashRow).Error; err != nil {
+ 			return err
+--- a/src/model/data/settings_data.go
++++ b/src/model/data/settings_data.go
+@@ -284,10 +284,10 @@
+ // excluding any keys in sensitiveSettingKeys.
+ func ListSettingsByGroup(group string) ([]mdb.Setting, error) {
+ 	var rows []mdb.Setting
+-	tx := dao.Mdb.Model(&mdb.Setting{}).Not("`key`", sensitiveSettingKeys)
++	tx := dao.Mdb.Model(&mdb.Setting{}).Not("key", sensitiveSettingKeys)
+ 	if group != "" {
+-		tx = tx.Where("`group` = ?", group)
++		tx = tx.Where(clause.Eq{Column: clause.Column{Name: "group"}, Value: group})
+ 	}
+-	err := tx.Order("`key` ASC").Find(&rows).Error
++	err := tx.Order("key ASC").Find(&rows).Error
+ 	return rows, err
+ }
+--- a/src/model/service/order_service.go
++++ b/src/model/service/order_service.go
+@@ -5,6 +5,7 @@
+ 	"encoding/base64"
+ 	"errors"
+ 	"fmt"
++	"os"
+ 	"strings"
+ 	"sync"
+ 
+@@ -110,6 +111,18 @@
+ 	}
+ }
+ 
++func validateNotifyURL(notifyURL string) error {
++	if err := security.ValidatePublicHTTPURL(notifyURL); err != nil {
++		// Permit only the exact internal callback explicitly configured by the operator.
++		// All other private, loopback and malformed URLs remain rejected.
++		if allowed := strings.TrimSpace(os.Getenv("EPUSDT_INTERNAL_NOTIFY_URL")); allowed != "" && notifyURL == allowed {
++			return nil
++		}
++		return err
++	}
++	return nil
++}
++
+ // CreateTransaction creates a new payment order.
+ func CreateTransaction(req *request.CreateTransactionRequest, apiKey *mdb.ApiKey) (*response.CreateTransactionResponse, error) {
+ 	token := strings.ToUpper(strings.TrimSpace(req.Token))
+@@ -119,7 +132,7 @@
+ 		return nil, err
+ 	}
+ 	notifyURL := strings.TrimSpace(req.NotifyUrl)
+-	if err := security.ValidatePublicHTTPURL(notifyURL); err != nil {
++	if err := validateNotifyURL(notifyURL); err != nil {
+ 		return nil, constant.NotifyURLErr
+ 	}
+ 	paymentType := mdb.PaymentTypeGmpay
+--- a/src/model/service/order_service_test.go
++++ b/src/model/service/order_service_test.go
+@@ -88,6 +88,19 @@
+ 	}
+ }
+ 
++func TestValidateNotifyURLAllowsOnlyExactConfiguredInternalURL(t *testing.T) {
++	allowed := "http://payment-adapter:8080/callbacks/gmpay"
++	t.Setenv("EPUSDT_INTERNAL_NOTIFY_URL", allowed)
++	if err := validateNotifyURL(allowed); err != nil {
++		t.Fatalf("exact configured internal URL rejected: %v", err)
++	}
++	for _, denied := range []string{"http://127.0.0.1/notify", allowed + "/other", "http://payment-adapter:8080/"} {
++		if err := validateNotifyURL(denied); err == nil {
++			t.Fatalf("unconfigured internal URL accepted: %s", denied)
++		}
++	}
++}
++
+ func TestCreateTransactionCreatesWaitSelectPlaceholderWithoutTokenNetwork(t *testing.T) {
+ 	cleanup := testutil.SetupTestDatabases(t)
+ 	defer cleanup()

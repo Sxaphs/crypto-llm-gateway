@@ -1,0 +1,55 @@
+{
+  "generated_at_utc": "2026-11-09T00:00:00Z",
+  "note": "初始状态：所有项 NOT RUN，未伪造任何 PASS/FAIL。运行 scripts/acceptance.py 后会自动更新。",
+  "items": {
+    "email_register": {
+      "name": "邮箱注册（IMAP/--email-code，注册后真实登录）",
+      "status": "NOT RUN",
+      "summary": "尚未运行",
+      "evidence": "",
+      "updated_at_utc": ""
+    },
+    "order_payment": {
+      "name": "创建 5 USDT 订单并等待真实付款",
+      "status": "NOT RUN",
+      "summary": "尚未运行",
+      "evidence": "",
+      "updated_at_utc": ""
+    },
+    "openai_chat": {
+      "name": "OpenAI SDK chat（usage+pricing 核对扣费）",
+      "status": "NOT RUN",
+      "summary": "尚未运行",
+      "evidence": "",
+      "updated_at_utc": ""
+    },
+    "seedance_video": {
+      "name": "Seedance 视频生成轮询（content.video_url + 扣费核对）",
+      "status": "NOT RUN",
+      "summary": "尚未运行",
+      "evidence": "",
+      "updated_at_utc": ""
+    },
+    "epusdt_resend_callback": {
+      "name": "epusdt resend-callback 重放 + quota 不变",
+      "status": "NOT RUN",
+      "summary": "尚未运行",
+      "evidence": "",
+      "updated_at_utc": ""
+    },
+    "restart": {
+      "name": "docker compose restart + 数据检查",
+      "status": "NOT RUN",
+      "summary": "尚未运行",
+      "evidence": "",
+      "updated_at_utc": ""
+    },
+    "reconcile": {
+      "name": "三方对账",
+      "status": "NOT RUN",
+      "summary": "尚未运行",
+      "evidence": "",
+      "updated_at_utc": ""
+    }
+  }
+}

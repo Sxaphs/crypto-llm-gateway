@@ -1,0 +1,322 @@
+# crypto-llm-mvp 部署底座
+#
+# 服务：postgres / redis / new-api / epusdt / payment-adapter / reconciler / gateway(Caddy)
+# - 只 gateway 对外 80/443；PG 仅绑定 127.0.0.1:15432，Redis 不暴露宿主端口
+# - 全部 UTC、restart、健康检查、命名卷持久化
+# - 内部网络固定 subnet 172.30.250.0/24
+#   gateway=172.30.250.10  epusdt=172.30.250.20  payment-adapter=172.30.250.30  new-api=172.30.250.40
+#
+# 前置：复制 .env.example 为 .env 并填好所有 CHANGE_ME 项；强烈建议用 ./start.sh（或 start.ps1）引导。
+# 说明：
+#   - new-api 从项目根 `.` 构建（dockerfile: new-api/Dockerfile），以便 Dockerfile 内 COPY patches/ 成功。
+#   - payment-adapter 从 ./adapter 构建；reconciler 复用其镜像，仅换 command 运行 python -m app.reconcile_loop。
+#   - 契约：payment-adapter 固定监听 8080（gateway 反代与健康检查均按此）。
+
+name: crypto-llm-mvp
+
+networks:
+  internal:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.30.250.0/24
+          gateway: 172.30.250.1
+
+volumes:
+  postgres-data:
+  redis-data:
+  new-api-data:
+  new-api-logs:
+  epusdt-data:
+  reports:
+  caddy-data:
+  caddy-config:
+
+configs:
+  # epusdt 从 EPUSDT_CONFIG=/data/.env 读取配置；此 content 由 Compose 用 .env 插值生成。
+  # 关键点：
+  #   - app_uri 指向独立收银台域名 PAY_DOMAIN
+  #   - db_type=postgres，主库 epusdt（postgres_* 键为 epusdt v2.0.0 官方配置键）
+  #   - 运行时 SQLite（runtime_sqlite_filename）仍落在 /data 持久化
+  #   - install=false 关闭首启安装向导；管理员账号由 epusdt 首启随机生成并打印到日志
+  #   - 回调重试显式配置（callback_retry_base_seconds / order_notice_max_retry）
+  #   - 不写任何旧版 Redis 配置（v2 已移除 Redis）
+  epusdt-env:
+    content: |
+      app_name=epusdt
+      app_uri=https://${PAY_DOMAIN}
+      log_level=info
+      http_access_log=false
+      sql_debug=false
+      http_listen=:8000
+
+      static_path=/static
+      runtime_root_path=/data/runtime
+      log_save_path=/data/logs
+      log_max_size=32
+      log_max_age=7
+      max_backups=3
+
+      # 主库：PostgreSQL（库名 epusdt）
+      db_type=postgres
+      postgres_user=postgres
+      postgres_passwd=${POSTGRES_PASSWORD}
+      postgres_host=postgres
+      postgres_port=5432
+      postgres_database=epusdt
+      postgres_table_prefix=
+      postgres_max_idle_conns=10
+      postgres_max_open_conns=100
+      postgres_max_life_time=6
+
+      # 运行时 SQLite 仍在 /data 持久化（汇率缓存/队列游标等）
+      runtime_sqlite_filename=epusdt-runtime.db
+
+      # 后台调度与回调重试
+      queue_concurrency=10
+      queue_poll_interval_ms=1000
+      callback_retry_base_seconds=5
+      order_expiration_time=10
+      order_notice_max_retry=10
+
+      api_rate_url=
+
+      install=false
+
+services:
+  postgres:
+    image: ${POSTGRES_IMAGE:-postgres:16-alpine}
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: postgres
+      TZ: UTC
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./db:/docker-entrypoint-initdb.d:ro
+    networks:
+      - internal
+    # 仅回环地址供宿主验收/对账脚本使用；不对 LAN/公网暴露。
+    ports:
+      - "127.0.0.1:${POSTGRES_HOST_PORT:-15432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  redis:
+    image: ${REDIS_IMAGE:-redis:7-alpine}
+    restart: unless-stopped
+    command:
+      - redis-server
+      - --appendonly
+      - "yes"
+      - --appendfsync
+      - everysec
+      - --requirepass
+      - ${REDIS_PASSWORD}
+    environment:
+      TZ: UTC
+      # 供健康检查 redis-cli 免密码参数自动鉴权
+      REDISCLI_AUTH: ${REDIS_PASSWORD}
+    volumes:
+      - redis-data:/data
+    networks:
+      - internal
+    # 不暴露宿主端口
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli ping | grep -q PONG"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  new-api:
+    build:
+      context: .
+      dockerfile: new-api/Dockerfile
+      args:
+        # 默认固定 v1.0.0-rc.49；升级时必须同时重审补丁和 UPSTREAM_COMMIT。
+        UPSTREAM_TAG: ${NEW_API_VERSION:-v1.0.0-rc.49}
+    restart: unless-stopped
+    command: ["--log-dir", "/app/logs"]
+    environment:
+      TZ: UTC
+      SQL_DSN: postgresql://postgres:${POSTGRES_PASSWORD}@postgres:5432/new_api?sslmode=disable
+      REDIS_CONN_STRING: redis://:${REDIS_PASSWORD}@redis:6379
+      SESSION_SECRET: ${SESSION_SECRET}
+      SESSION_COOKIE_SECURE: "true"
+      # Secure 模式必填（New API 官方要求列出全部精确 HTTPS Origin）
+      SESSION_COOKIE_TRUSTED_URL: https://${SITE_DOMAIN},https://${NEW_API_ADMIN_DOMAIN}
+      ERROR_LOG_ENABLED: "true"
+      BATCH_UPDATE_ENABLED: "true"
+      TRUSTED_PROXIES: 172.30.250.10
+      EPAY_HMAC_KEY: ${EPAY_HMAC_KEY}
+      EPAY_EXACT_QUOTA_ENABLED: "true"
+      NODE_NAME: new-api-node-1
+    volumes:
+      - new-api-data:/data
+      - new-api-logs:/app/logs
+    networks:
+      internal:
+        ipv4_address: 172.30.250.40
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://localhost:3000/api/status | grep -o '\"success\":\\s*true' || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+  epusdt:
+    image: ${EPUSDT_IMAGE:-crypto-llm-mvp/epusdt:v2.0.0-pg-fix}
+    build:
+      context: .
+      dockerfile: epusdt/Dockerfile
+      args:
+        UPSTREAM_TAG: v2.0.0
+        UPSTREAM_COMMIT: 619cecb11d6bbd1dcdd1b698ee08b37fc722d3e3
+    restart: unless-stopped
+    environment:
+      TZ: UTC
+      EPUSDT_CONFIG: /data/.env
+      # 仅允许这个精确内网地址绕过公网 URL 校验；adapter 仍校验来源 IP 与 HMAC。
+      EPUSDT_INTERNAL_NOTIFY_URL: http://payment-adapter:8080/callbacks/gmpay
+    configs:
+      - source: epusdt-env
+        target: /data/.env
+    volumes:
+      - epusdt-data:/data
+    networks:
+      internal:
+        ipv4_address: 172.30.250.20
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      # 打 epusdt 的公开配置端点确认进程可服务（不走网关，直连容器）
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8000/payments/gmpay/v1/config || exit 1"]
+      interval: 20s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  payment-adapter:
+    image: ${ADAPTER_IMAGE:-crypto-llm-mvp/payment-adapter:local}
+    build:
+      context: ./adapter
+    restart: unless-stopped
+    environment:
+      TZ: UTC
+      DATABASE_URL: postgresql+psycopg://postgres:${POSTGRES_PASSWORD}@postgres:5432/adapter
+      NEW_API_DATABASE_URL: postgresql+psycopg://postgres:${POSTGRES_PASSWORD}@postgres:5432/new_api
+      EPUSDT_BASE_URL: http://epusdt:8000
+      NEW_API_NOTIFY_URL: http://gateway/api/user/epay/notify
+      EPUSDT_CONTAINER_IP: 172.30.250.20
+      EPAY_PID: ${GMPAY_PID}
+      EPAY_MD5_KEY: ${EPAY_MD5_KEY}
+      GMPAY_PID: ${GMPAY_PID}
+      GMPAY_SECRET_KEY: ${GMPAY_SECRET_KEY}
+      EPAY_HMAC_KEY: ${EPAY_HMAC_KEY}
+      EPUSDT_ADMIN_USERNAME: ${EPUSDT_ADMIN_USERNAME}
+      EPUSDT_ADMIN_PASSWORD: ${EPUSDT_ADMIN_PASSWORD}
+      PUBLIC_BASE_URL: https://${SITE_DOMAIN}
+      QUOTA_PER_USD: "500000"
+      RATE_MAX_AGE_SECONDS: "300"
+      TRONGRID_API_KEY: ${TRONGRID_API_KEY}
+      ETHERSCAN_API_KEY: ${ETHERSCAN_API_KEY}
+      USDC_POLYGON_CONTRACT: ${USDC_POLYGON_CONTRACT}
+    networks:
+      internal:
+        ipv4_address: 172.30.250.30
+    depends_on:
+      postgres:
+        condition: service_healthy
+      epusdt:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=3)\" || exit 1"]
+      interval: 20s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  reconciler:
+    image: ${ADAPTER_IMAGE:-crypto-llm-mvp/payment-adapter:local}
+    restart: unless-stopped
+    command: ["python", "-m", "app.reconcile_loop"]
+    environment:
+      TZ: UTC
+      ADAPTER_PG_DSN: postgresql://postgres:${POSTGRES_PASSWORD}@postgres:5432/adapter
+      NEW_API_BASE_URL: http://new-api:3000
+      NEW_API_ADMIN_USERNAME: ${NEW_API_ADMIN_USERNAME}
+      NEW_API_ADMIN_PASSWORD: ${NEW_API_ADMIN_PASSWORD}
+      EPUSDT_BASE_URL: http://epusdt:8000
+      EPUSDT_ADMIN_USERNAME: ${EPUSDT_ADMIN_USERNAME}
+      EPUSDT_ADMIN_PASSWORD: ${EPUSDT_ADMIN_PASSWORD}
+      TRONGRID_API_KEY: ${TRONGRID_API_KEY}
+      ETHERSCAN_API_KEY: ${ETHERSCAN_API_KEY}
+      USDC_POLYGON_CONTRACT: ${USDC_POLYGON_CONTRACT}
+      TG_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
+      TG_CHAT_ID: ${TELEGRAM_CHAT_ID}
+      RECONCILE_INTERVAL_SECONDS: "86400"
+      REPORT_DIR: /reports
+    volumes:
+      - reports:/reports
+      - ./scripts:/app/scripts:ro
+    networks:
+      - internal
+    depends_on:
+      postgres:
+        condition: service_healthy
+      epusdt:
+        condition: service_healthy
+    healthcheck:
+      # 读 /reports/reconcile_heartbeat.json：mtime（最近一次成功对账）须在
+      # 2×RECONCILE_INTERVAL_SECONDS 内（下限 30min），且 status/state 非 error/failed/stale/down。
+      # 首轮对账前文件不存在 -> 判定 unhealthy（可接受，对账依赖不阻塞启动）。
+      test: ["CMD-SHELL", "python -c \"import json,os,time,sys; p='/reports/reconcile_heartbeat.json'; d=json.load(open(p)) if os.path.exists(p) else sys.exit(1); age=time.time()-os.path.getmtime(p); iv=int(os.environ.get('RECONCILE_INTERVAL_SECONDS','86400')); st=str(d.get('status',d.get('state','ok'))).lower(); sys.exit(0 if age<max(iv*2,1800) and st not in ('error','failed','stale','down') else 1)\" || exit 1"]
+      interval: 300s
+      timeout: 15s
+      retries: 3
+      start_period: 120s
+
+  gateway:
+    image: ${CADDY_IMAGE:-caddy:2-alpine}
+    restart: unless-stopped
+    environment:
+      TZ: UTC
+      SITE_DOMAIN: ${SITE_DOMAIN}
+      PAY_DOMAIN: ${PAY_DOMAIN}
+      NEW_API_ADMIN_DOMAIN: ${NEW_API_ADMIN_DOMAIN}
+      EPUSDT_ADMIN_DOMAIN: ${EPUSDT_ADMIN_DOMAIN}
+      ADMIN_BASIC_AUTH_HASH: ${ADMIN_BASIC_AUTH_HASH}
+      ACME_EMAIL: ${ACME_EMAIL:-local@localhost}
+    volumes:
+      - ./gateway/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    ports:
+      - "80:80"
+      - "443:443"
+    networks:
+      internal:
+        ipv4_address: 172.30.250.10
+    depends_on:
+      new-api:
+        condition: service_started
+      epusdt:
+        condition: service_started
+    healthcheck:
+      test: ["CMD-SHELL", "wget -S -q -O /dev/null http://gateway/ 2>&1 | grep -q '403' || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s

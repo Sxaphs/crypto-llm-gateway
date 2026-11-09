@@ -1,0 +1,27 @@
+# 根构建上下文排除清单。
+# new-api 的 build context 为项目根 `.`（dockerfile: new-api/Dockerfile），
+# 必须保留 new-api/ 与 patches/（Dockerfile 内 COPY patches 依赖），不得排除。
+# payment-adapter 仍以 ./adapter 为独立 context，使用 adapter/ 自有 .dockerignore。
+
+.git
+.gitignore
+.dockerignore
+.env
+.env.*
+.cache/
+gateway/
+db/
+adapter/
+scripts/
+acceptance/
+reports/
+output/
+logs/
+*.log
+*.md
+.idea/
+.vscode/
+.venv/
+__pycache__/
+.pytest_cache/
+*.pyc
